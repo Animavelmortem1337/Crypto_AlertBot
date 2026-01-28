@@ -11,7 +11,7 @@ matplotlib.use('Agg')
 import mplfinance as mpf
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime, time
+from datetime import datetime, timezone # Добавили timezone
 from aiogram import Bot, types
 from aiogram.enums import ParseMode
 from dotenv import load_dotenv
@@ -70,14 +70,14 @@ class TradingBot:
         return df
 
     async def send_daily_report(self):
-        """Отправка статистики за день в 23:00 (UTC+2)"""
-        now_local = datetime.now() # На сервере это UTC
+        # Используем современный способ получения времени
+        now_utc = datetime.now(timezone.utc)
         if self.daily_stats['total'] == 0:
-            msg = f"📊 <b>Отчет за {now_local.strftime('%d.%m')} (23:00 UTC+2)</b>\nСделок сегодня не было. Рынок был спокойным. 💤"
+            msg = f"📊 <b>Отчет за {now_utc.strftime('%d.%m')} (23:00 UTC+2)</b>\nСделок сегодня не было. 💤"
         else:
             winrate = (self.daily_stats['wins'] / self.daily_stats['total']) * 100
             msg = (f"📊 <b>Ежедневный отчет (23:00 UTC+2)</b>\n"
-                   f"Дата: {now_local.strftime('%d.%m.%Y')}\n\n"
+                   f"Дата: {now_utc.strftime('%d.%m.%Y')}\n\n"
                    f"✅ Профитных: {self.daily_stats['wins']}\n"
                    f"❌ Убыточных: {self.daily_stats['losses']}\n"
                    f"📈 Всего сделок: {self.daily_stats['total']}\n"
@@ -85,20 +85,16 @@ class TradingBot:
                    f"💰 Чистый профит: <b>{self.daily_stats['profit']:.2f}%</b>")
         
         await self.bot.send_message(chat_id=TG_CHANNEL_ID, text=msg, parse_mode=ParseMode.HTML)
-        # Сброс статистики и кэша сигналов раз в сутки
         self.daily_stats = {'total': 0, 'wins': 0, 'losses': 0, 'profit': 0.0}
         self.processed_signals.clear()
 
     async def track_results(self, current_price):
         if not self.active_trades: return
-        
         for trade in self.active_trades[:]:
             side = trade['side']
             tp, sl = trade['tp'], trade['sl']
-            
             is_tp = (side == 'LONG' and current_price >= tp) or (side == 'SHORT' and current_price <= tp)
             is_sl = (side == 'LONG' and current_price <= sl) or (side == 'SHORT' and current_price >= sl)
-            
             if is_tp or is_sl:
                 self.daily_stats['total'] += 1
                 if is_tp:
@@ -109,11 +105,7 @@ class TradingBot:
                     self.daily_stats['losses'] += 1
                     self.daily_stats['profit'] -= trade['risk_pct']
                     res_text = f"❌ Закрыто по стопу -{trade['risk_pct']}%"
-                
-                msg = (f"🏁 <b>Сделка {trade['id']} закрыта</b>\n"
-                       f"Результат: {res_text}\n"
-                       f"Цена: {current_price}")
-                
+                msg = (f"🏁 <b>Сделка {trade['id']} закрыта</b>\n{res_text}\nЦена: {current_price}")
                 await self.bot.send_message(chat_id=TG_CHANNEL_ID, text=msg, parse_mode=ParseMode.HTML)
                 self.active_trades.remove(trade)
 
@@ -121,31 +113,21 @@ class TradingBot:
         dw = await self.fetch_data(symbol, tf_p['work'])
         df = await self.fetch_data(symbol, tf_p['filter'])
         if dw is None or df is None: return False
-        
         dw, df = self.calculate_indicators(dw), self.calculate_indicators(df)
         if 'EMA_200' not in dw.columns: return False
-
         c, p = dw.iloc[-1], dw.iloc[-2]
         side = None
-        # Тренд по EMA 200 + пересечение EMA 20
         if c['close'] > c['EMA_200'] and c['close'] > c['EMA_20'] and p['close'] <= p['EMA_20']: side = 'LONG'
         elif c['close'] < c['EMA_200'] and c['close'] < c['EMA_20'] and p['close'] >= p['EMA_20']: side = 'SHORT'
-
         if side and c['ADX_14'] > 18:
             entry, atr = c['close'], c['ATRr_14']
             sl = entry - (atr * ATR_MULT_SL) if side == 'LONG' else entry + (atr * ATR_MULT_SL)
             tp_dist = max(atr * ATR_MULT_TP, entry * MIN_TARGET_PCT)
             tp = entry + tp_dist if side == 'LONG' else entry - tp_dist
-            
-            target_pct = round((abs(tp - entry) / entry) * 100, 2)
-            risk_pct = round((abs(entry - sl) / entry) * 100, 2)
+            target_pct, risk_pct = round((abs(tp - entry) / entry) * 100, 2), round((abs(entry - sl) / entry) * 100, 2)
             sig_id = f"ID_{dw.index[-1].strftime('%H%M')}"
-            
             if sig_id not in self.processed_signals:
-                msg = (f"🚀 <b>{side} Signal | BTC</b>\n🎯 Цель: +{target_pct}%\n"
-                       f"---------------------------\n🎯 Вход: {entry}\n🛡 Стоп: {sl:.2f}\n💰 Тейк: {tp:.2f}\n"
-                       f"---------------------------\nID: {sig_id}")
-                
+                msg = (f"🚀 <b>{side} Signal | BTC</b>\n🎯 Цель: +{target_pct}%\n---------------------------\n🎯 Вход: {entry}\n🛡 Стоп: {sl:.2f}\n💰 Тейк: {tp:.2f}\n---------------------------\nID: {sig_id}")
                 await self.bot.send_message(chat_id=TG_CHANNEL_ID, text=msg, parse_mode=ParseMode.HTML)
                 self.active_trades.append({'id': sig_id, 'side': side, 'tp': tp, 'sl': sl, 'target_pct': target_pct, 'risk_pct': risk_pct})
                 self.processed_signals.add(sig_id)
@@ -154,29 +136,24 @@ class TradingBot:
 
     async def run(self):
         await self.bot.send_message(chat_id=TG_CHANNEL_ID, text="Бот запущен. Ежедневный отчет в 23:00 (UTC+2).")
-        print("🚀 Бот в сети. Ожидание сигналов...", flush=True)
-
+        print("🚀 Бот в сети...", flush=True)
         while True:
             try:
-                now_utc = datetime.utcnow()
-                # 21:00 UTC == 23:00 UTC+2
+                # Обновленный способ получения времени (теперь без DeprecationWarning)
+                now_utc = datetime.now(timezone.utc)
                 if now_utc.hour == 21 and now_utc.minute == 0:
                     await self.send_daily_report()
                     await asyncio.sleep(61) 
 
                 ticker = await self.exchange.fetch_ticker('BTC/USDT')
                 cur_price = ticker['last']
-                
-                # Лог каждые 60 сек
                 print(f"🔄 [{now_utc.strftime('%H:%M')} UTC] Цена: {cur_price} | Активных: {len(self.active_trades)}", flush=True)
                 
                 await self.track_results(cur_price)
                 for tf in TIMEFRAME_PAIRS:
                     if await self.analyze_pair('BTC/USDT', tf): break
                     await asyncio.sleep(1)
-            except Exception as e:
-                print(f"⚠️ Ошибка: {e}", flush=True)
-            
+            except Exception as e: print(f"⚠️ Ошибка: {e}", flush=True)
             await asyncio.sleep(60)
 
 if __name__ == "__main__":
