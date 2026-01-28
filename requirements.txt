@@ -1,0 +1,11 @@
+aiogram>=3.0
+ccxt
+pandas
+pandas_ta
+mplfinance
+python-dotenv
+numpy
+aiohttp
+matplotlib
+gspread             
+oauth2client
