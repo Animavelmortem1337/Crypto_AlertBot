@@ -9,7 +9,7 @@ import pandas_ta as ta
 import ccxt.async_support as ccxt
 import matplotlib
 
-# Настройка для работы без монитора (для Railway/Docker)
+# Настройка для работы без монитора
 matplotlib.use('Agg') 
 import mplfinance as mpf
 import gspread
@@ -32,7 +32,6 @@ TG_CHANNEL_ID = os.getenv("TG_CHANNEL_ID", "8371135844")
 
 SYMBOLS = ['BTC/USDT']
 
-# Таймфреймы (Приоритет сверху вниз: 1ч -> 15м -> 5м)
 TIMEFRAME_PAIRS = [
     {'work': '1h', 'filter': '4h'},     
     {'work': '15m', 'filter': '4h'},    
@@ -40,11 +39,11 @@ TIMEFRAME_PAIRS = [
 ]
 
 # Настройки стратегии
-MAX_SL_PCT = 0.018    # Макс стоп 1.8%
-TARGET_MOVE = 0.012   # Цель: 1.2% чистого движения BTC
-MIN_RR = 1.5          # Мин риск/прибыль
-ATR_MULT = 2.0        # Множитель ATR для стопа
-VOL_FACTOR = 1.3      # На сколько объем должен быть выше среднего
+MAX_SL_PCT = 0.018    
+TARGET_MOVE = 0.012   
+MIN_RR = 1.5          
+ATR_MULT = 2.0        
+VOL_FACTOR = 1.3      
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,7 +65,6 @@ class TradingBot:
         self._connect_google()
 
     def _connect_google(self):
-        """Подключение к Google Sheets для истории"""
         if GOOGLE_JSON:
             try:
                 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -79,11 +77,10 @@ class TradingBot:
                 logging.error(f"❌ Google Sheet error: {e}")
 
     async def send_startup_message(self):
-        """Уведомление админа о запуске"""
         try:
             await self.bot.send_message(
                 chat_id=TG_CHANNEL_ID,
-                text=f"🤖 <b>Бот-Аналитик Запущен!</b>\nTarget: >1.0% Move\nAdmin ID: {TG_CHANNEL_ID}",
+                text=f"🤖 <b>Бот-Аналитик Перезапущен!</b>\nФикс Боллинджера активен.\nAdmin ID: {TG_CHANNEL_ID}",
                 parse_mode=ParseMode.HTML
             )
         except Exception as e:
@@ -101,19 +98,25 @@ class TradingBot:
             return None
 
     def calculate_indicators(self, df):
-        """Расчет всей математики"""
+        # Базовые
         df.ta.ema(length=20, append=True)
         df.ta.ema(length=50, append=True)
         df.ta.adx(length=14, append=True)
         df.ta.rsi(length=14, append=True)
         df.ta.atr(length=14, append=True)
-        df.ta.bbands(length=20, std=2.0, append=True)
         
-        # Ширина Боллинджера для Squeeze
-        df['BB_WIDTH'] = (df['BBU_20_2.0'] - df['BBL_20_2.0']) / df['BBM_20_2.0']
+        # Боллинджер (с фиксом имен колонок)
+        bb = df.ta.bbands(length=20, std=2.0)
+        df = pd.concat([df, bb], axis=1)
+        
+        # Динамический поиск колонок (защита от ошибок)
+        df['BBU_FIX'] = df.filter(like='BBU').iloc[:, 0]
+        df['BBL_FIX'] = df.filter(like='BBL').iloc[:, 0]
+        df['BBM_FIX'] = df.filter(like='BBM').iloc[:, 0]
+        
+        df['BB_WIDTH'] = (df['BBU_FIX'] - df['BBL_FIX']) / df['BBM_FIX']
         df['VOL_SMA_20'] = df['volume'].rolling(20).mean()
         
-        # Уровни для графика
         df['DC_HIGH'] = df['high'].rolling(20).max()
         df['DC_LOW'] = df['low'].rolling(20).min()
         return df
@@ -133,19 +136,15 @@ class TradingBot:
         return (full > 0) and ((body / full) > 0.4)
 
     def calculate_score(self, trend, rsi, volume, vol_avg, bb_width, prev_bb_width, side):
-        """Скоринг сигнала (винрейт)"""
         score = 0
         reasons = []
-
         if trend != 'FLAT':
             score += 30
             reasons.append("Trend ✅")
-
         if volume > vol_avg * VOL_FACTOR:
             score += 20
             reasons.append("Volume 🔥")
 
-        # Фильтр RSI: Ищем потенциал для хода в 1%
         if side == 'LONG':
             if 45 <= rsi <= 65: score += 15; reasons.append("RSI Opt")
             elif rsi > 70: score -= 30; reasons.append("Overbought ⚠️")
@@ -153,22 +152,20 @@ class TradingBot:
             if 35 <= rsi <= 55: score += 15; reasons.append("RSI Opt")
             elif rsi < 30: score -= 30; reasons.append("Oversold ⚠️")
 
-        # Если волатильность начинает расти
         if bb_width > prev_bb_width:
             score += 15
-            reasons.append("Volatility Expand 💥")
+            reasons.append("Volat Expand 💥")
 
         return max(0, score), ", ".join(reasons)
 
     def generate_chart(self, df, symbol, signal, timeframe):
-        """Отрисовка проф. графика"""
         plot_df = df.tail(60)
         style = mpf.make_mpf_style(base_mpf_style='nightclouds', rc={'font.size': 8})
         
         apds = [
             mpf.make_addplot(plot_df['EMA_20'], color='cyan', width=0.8),
-            mpf.make_addplot(plot_df['BBU_20_2.0'], color='gray', width=0.5, alpha=0.3),
-            mpf.make_addplot(plot_df['BBL_20_2.0'], color='gray', width=0.5, alpha=0.3),
+            mpf.make_addplot(plot_df['BBU_FIX'], color='gray', width=0.5, alpha=0.3),
+            mpf.make_addplot(plot_df['BBL_FIX'], color='gray', width=0.5, alpha=0.3),
         ]
         
         lines = dict(hlines=[signal['entry'], signal['sl'], signal['tp']],
@@ -195,12 +192,9 @@ class TradingBot:
         curr, prev = df_w.iloc[-1], df_w.iloc[-2]
         side = None
 
-        # Фильтры силы
         adx_ok = curr['ADX_14'] > 20
         vol_ok = curr['volume'] > curr['VOL_SMA_20'] * VOL_FACTOR
-        candle_ok = self.is_strong_candle(curr['open'], curr['close'], curr['high'], curr['low'])
         
-        # Логика пробоя EMA с фильтрами
         if trend == 'UP' and curr['close'] > curr['EMA_20'] and prev['close'] <= prev['EMA_20']:
             if adx_ok and vol_ok and curr['RSI_14'] < 70: side = 'LONG'
         elif trend == 'DOWN' and curr['close'] < curr['EMA_20'] and prev['close'] >= prev['EMA_20']:
@@ -210,7 +204,6 @@ class TradingBot:
             entry = curr['close']
             atr = curr['ATRr_14']
             
-            # Расчет целей (Тейк на 1.2%)
             if side == 'LONG':
                 sl = entry - (atr * ATR_MULT)
                 tp = entry * (1 + TARGET_MOVE)
@@ -223,13 +216,15 @@ class TradingBot:
             score, reasons = self.calculate_score(trend, curr['RSI_14'], curr['volume'], 
                                                curr['VOL_SMA_20'], curr['BB_WIDTH'], prev['BB_WIDTH'], side)
 
-            # Проверка качества сделки
             if rr >= MIN_RR and score >= 60 and risk_pct <= MAX_SL_PCT:
                 sig_id = f"{symbol}_{side}_{work_tf}_{df_w.index[-1]}"
                 if sig_id not in self.processed_signals:
-                    # Запрос фандинга
-                    funding_data = await self.exchange.fetch_funding_rate(symbol)
-                    funding = funding_data['fundingRate']
+                    # Запрос фандинга через V5 API Bybit
+                    funding = 0.0
+                    try:
+                        f_data = await self.exchange.fetch_funding_rate(symbol)
+                        funding = f_data['fundingRate']
+                    except: pass
                     
                     chart = self.generate_chart(df_w, symbol, 
                                                 {'entry':entry,'sl':sl,'tp':tp,'score':score,'side':side}, 
@@ -262,28 +257,25 @@ class TradingBot:
         logging.info("Bot starting...")
         await self.send_startup_message()
         while True:
-            t = datetime.now().strftime("%H:%M:%S")
-            logging.info(f"🔄 [{t}] Checking BTC for 1% moves (1H -> 15M -> 5M)...")
+            try:
+                t = datetime.now().strftime("%H:%M:%S")
+                logging.info(f"🔄 [{t}] Checking BTC for 1% moves...")
+                for tf in TIMEFRAME_PAIRS:
+                    if await self.analyze_pair('BTC/USDT', tf):
+                        logging.info("🛑 Signal sent. Break.")
+                        break
+                    await asyncio.sleep(1)
+            except Exception as e:
+                logging.error(f"Loop Error: {e}")
             
-            for tf in TIMEFRAME_PAIRS:
-                sent = await self.analyze_pair('BTC/USDT', tf)
-                if sent:
-                    logging.info("🛑 Higher TF signal sent. Skipping lower TFs.")
-                    break # Защита от спама на разных ТФ
-                await asyncio.sleep(1)
-            
-            await asyncio.sleep(60) # Проверка раз в минуту
-
-    async def close(self):
-        await self.exchange.close()
-        await self.bot.session.close()
+            await asyncio.sleep(60)
 
 async def main():
     bot = TradingBot()
     try:
         await bot.run()
     except Exception as e:
-        logging.error(f"CRITICAL ERROR: {e}")
+        logging.error(f"CRITICAL: {e}")
     finally:
         await bot.close()
 
