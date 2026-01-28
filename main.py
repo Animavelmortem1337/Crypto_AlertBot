@@ -38,7 +38,7 @@ class TradingBot:
         self.exchange = ccxt.bybit({'apiKey': API_KEY, 'secret': API_SECRET, 'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
         self.bot = Bot(token=TG_TOKEN)
         self.processed_signals = set()
-        self.active_trades = [] # Список для отслеживания результатов
+        self.active_trades = [] 
         self.sheet = None
         self._connect_google()
 
@@ -50,7 +50,7 @@ class TradingBot:
                 print("✅ Google Sheet подключена!", flush=True)
             except Exception as e: print(f"❌ Ошибка Google Sheet: {e}", flush=True)
 
-    async def fetch_data(self, symbol, timeframe, limit=100):
+    async def fetch_data(self, symbol, timeframe, limit=150):
         try:
             ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -60,61 +60,58 @@ class TradingBot:
         except: return None
 
     def calculate_indicators(self, df):
-        df.ta.ema(length=20, append=True); df.ta.ema(length=50, append=True); df.ta.ema(length=200, append=True)
-        df.ta.adx(length=14, append=True); df.ta.rsi(length=14, append=True); df.ta.atr(length=14, append=True)
+        # Важно: EMA 200 требует много данных, поэтому limit=150 в fetch_data
+        df.ta.ema(length=20, append=True)
+        df.ta.ema(length=50, append=True)
+        df.ta.ema(length=200, append=True)
+        df.ta.adx(length=14, append=True)
+        df.ta.rsi(length=14, append=True)
+        df.ta.atr(length=14, append=True)
         return df
 
-    async def track_results(self):
-        """Проверка активных сделок на достижение TP или SL"""
+    async def track_results(self, current_price):
+        """Проверка активных сделок"""
         if not self.active_trades: return
         
-        try:
-            ticker = await self.exchange.fetch_ticker('BTC/USDT')
-            current_price = ticker['last']
+        for trade in self.active_trades[:]:
+            side = trade['side']
+            tp, sl = trade['tp'], trade['sl']
             
-            for trade in self.active_trades[:]: # Копия списка для удаления элементов
-                side = trade['side']
-                tp, sl = trade['tp'], trade['sl']
+            is_tp = (side == 'LONG' and current_price >= tp) or (side == 'SHORT' and current_price <= tp)
+            is_sl = (side == 'LONG' and current_price <= sl) or (side == 'SHORT' and current_price >= sl)
+            
+            if is_tp or is_sl:
+                result_emoji = "✅ Take Profit!" if is_tp else "❌ Stop Loss"
+                pnl = f"+{trade['target_pct']}%" if is_tp else f"-{trade['risk_pct']}%"
                 
-                is_tp = (side == 'LONG' and current_price >= tp) or (side == 'SHORT' and current_price <= tp)
-                is_sl = (side == 'LONG' and current_price <= sl) or (side == 'SHORT' and current_price >= sl)
+                msg = (f"🏁 <b>Сделка завершена</b>\n"
+                       f"ID: {trade['id']}\n"
+                       f"Результат: {result_emoji}\n"
+                       f"Итог: <b>{pnl}</b>")
                 
-                if is_tp or is_sl:
-                    result_emoji = "✅ Тейк достигнут!" if is_tp else "❌ Выбит по стопу"
-                    pnl = f"+{trade['target_pct']}%" if is_tp else f"-{trade['risk_pct']}%"
-                    
-                    msg = (f"🏁 <b>Результат сделки {trade['id']}</b>\n"
-                           f"Итог: {result_emoji}\n"
-                           f"Прибыль/Убыток: <b>{pnl}</b>\n"
-                           f"Цена закрытия: {current_price}")
-                    
-                    await self.bot.send_message(chat_id=TG_CHANNEL_ID, text=msg, parse_mode=ParseMode.HTML)
-                    print(f"📉 Сделка {trade['id']} закрыта: {pnl}", flush=True)
-                    
-                    # Удаляем из списка активных
-                    self.active_trades.remove(trade)
-                    
-                    # Логика обновления Google Sheets (опционально дописать поиск строки)
-                    try:
-                        if self.sheet: self.sheet.append_row([str(datetime.now()), f"CLOSE_{trade['id']}", pnl, current_price])
-                    except: pass
-        except Exception as e:
-            print(f"⚠️ Ошибка трекера: {e}", flush=True)
+                await self.bot.send_message(chat_id=TG_CHANNEL_ID, text=msg, parse_mode=ParseMode.HTML)
+                self.active_trades.remove(trade)
+                print(f"📉 Закрыто {trade['id']}: {pnl}", flush=True)
 
     async def analyze_pair(self, symbol, tf_p):
         dw = await self.fetch_data(symbol, tf_p['work'])
         df = await self.fetch_data(symbol, tf_p['filter'])
         if dw is None or df is None: return False
         
-        dw, df = self.calculate_indicators(dw), self.calculate_indicators(df)
+        dw = self.calculate_indicators(dw)
+        df = self.calculate_indicators(df)
+        
+        # Проверка наличия колонок перед использованием
+        if 'EMA_200' not in dw.columns: return False
+
         c, p = dw.iloc[-1], dw.iloc[-2]
         
-        # Упрощенная логика тренда для стабильности
-        trend_up = dw.iloc[-1]['close'] > dw.iloc[-1]['EMA_200']
-        side = 'LONG' if trend_up and c['close'] > c['EMA_20'] and p['close'] <= p['EMA_20'] else None
-        if not side:
-            trend_down = dw.iloc[-1]['close'] < dw.iloc[-1]['EMA_200']
-            side = 'SHORT' if trend_down and c['close'] < c['EMA_20'] and p['close'] >= p['EMA_20'] else None
+        # Логика входа
+        side = None
+        if c['close'] > c['EMA_200'] and c['close'] > c['EMA_20'] and p['close'] <= p['EMA_20']:
+            side = 'LONG'
+        elif c['close'] < c['EMA_200'] and c['close'] < c['EMA_20'] and p['close'] >= p['EMA_20']:
+            side = 'SHORT'
 
         if side and c['ADX_14'] > 18:
             entry, atr = c['close'], c['ATRr_14']
@@ -128,41 +125,39 @@ class TradingBot:
             sig_id = f"ID_{dw.index[-1].strftime('%H%M')}"
             
             if sig_id not in self.processed_signals:
-                score = 70 + (10 if target_pct > 1.2 else 0)
-                msg = (f"🚀 <b>{side} Signal | BTC</b>\n⚡ Уверенность: {score}%\n🎯 Цель: +{target_pct}%\n"
+                msg = (f"🚀 <b>{side} Signal | BTC</b>\n🎯 Цель: +{target_pct}%\n"
                        f"---------------------------\n🎯 Вход: {entry}\n🛡 Стоп: {sl:.2f}\n💰 Тейк: {tp:.2f}\n"
                        f"---------------------------\nID: {sig_id}")
                 
                 await self.bot.send_message(chat_id=TG_CHANNEL_ID, text=msg, parse_mode=ParseMode.HTML)
                 
-                # Добавляем в трекер
                 self.active_trades.append({
-                    'id': sig_id, 'side': side, 'entry': entry, 'tp': tp, 'sl': sl, 
+                    'id': sig_id, 'side': side, 'tp': tp, 'sl': sl, 
                     'target_pct': target_pct, 'risk_pct': risk_pct
                 })
-                
                 self.processed_signals.add(sig_id)
                 return True
         return False
 
     async def run(self):
-        await self.bot.send_message(chat_id=TG_CHANNEL_ID, text="Бот запущен с P&L Трекером")
-        print("🚀 Работает сканер + Трекер результатов...", flush=True)
+        await self.bot.send_message(chat_id=TG_CHANNEL_ID, text="Бот запущен")
+        print("🚀 Сканер активен...", flush=True)
 
         while True:
             try:
+                ticker = await self.exchange.fetch_ticker('BTC/USDT')
+                cur_price = ticker['last']
                 t = datetime.now().strftime('%H:%M:%S')
-                print(f"🔄 [{t}] Сканирование и проверка активных сделок...", flush=True)
                 
-                # 1. Проверяем результаты текущих сделок
-                await self.track_results()
+                print(f"🔄 [{t}] BTC: {cur_price} | Активных сделок: {len(self.active_trades)}", flush=True)
                 
-                # 2. Ищем новые сигналы
+                await self.track_results(cur_price)
+                
                 for tf in TIMEFRAME_PAIRS:
                     if await self.analyze_pair('BTC/USDT', tf): break
                     await asyncio.sleep(1)
             except Exception as e:
-                print(f"⚠️ Ошибка: {e}", flush=True)
+                print(f"⚠️ Ошибка в цикле: {e}", flush=True)
             
             await asyncio.sleep(60)
 
