@@ -177,11 +177,11 @@ class AdvancedBot:
         for trade in self.active_trades[:]:
             closed = False
             if trade['side'] == 'LONG':
-                if curr >= trade['tp']: closed, res, p = True, "✅ TAKE PROFIT", 1.0
-                elif curr <= trade['sl']: closed, res, p = True, "❌ STOP LOSS", -1.5
+                if curr >= trade['tp']: closed, res, p = True, "✅ TAKE PROFIT", 1.1
+                elif curr <= trade['sl']: closed, res, p = True, "❌ STOP LOSS", -0.5
             else:
-                if curr <= trade['tp']: closed, res, p = True, "✅ TAKE PROFIT", 1.0
-                elif curr >= trade['sl']: closed, res, p = True, "❌ STOP LOSS", -1.5
+                if curr <= trade['tp']: closed, res, p = True, "✅ TAKE PROFIT", 1.1
+                elif curr >= trade['sl']: closed, res, p = True, "❌ STOP LOSS", -0.5
             
             if closed:
                 await self.bot.send_message(TG_CHANNEL_ID, f"🔔 <b>Сделка закрыта</b>\n{res}\nЦена: {curr}")
