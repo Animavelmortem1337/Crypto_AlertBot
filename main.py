@@ -123,7 +123,7 @@ class AdvancedBot:
         if c['volume'] > df_5m['volume'].rolling(20).mean().iloc[-1]:
             score += 10; reasons.append(f"📊 Объем подтвержден (+10%)")
 
-        if score >= 70:
+        if score >= 55:
             sig_id = f"{side}_{df_5m.index[-1].strftime('%H%M')}"
             if sig_id not in self.processed_signals:
                 entry = round(c['close'], 1)
